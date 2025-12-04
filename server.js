@@ -5,6 +5,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -13,8 +14,8 @@ app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Store connected clients
-const broadcasters = new Set(); // Camera senders
+// Store connected clients with IDs
+const broadcasters = new Map(); // broadcasterId -> { ws, name }
 const viewers = new Set();      // Poe Canvas receivers
 
 // Health check endpoint
@@ -39,14 +40,28 @@ wss.on('connection', (ws, req) => {
       if (message.type === 'register') {
         // Client registers as broadcaster or viewer
         if (message.role === 'broadcaster') {
-          broadcasters.add(ws);
+          // Generate unique broadcaster ID
+          const broadcasterId = crypto.randomUUID();
+          ws.broadcasterId = broadcasterId;
           ws.role = 'broadcaster';
-          console.log('Broadcaster registered. Total broadcasters:', broadcasters.size);
+          ws.broadcasterName = message.name || 'Model ' + (broadcasters.size + 1);
 
-          // Notify all viewers that broadcaster is online
+          broadcasters.set(broadcasterId, {
+            ws: ws,
+            name: ws.broadcasterName
+          });
+
+          console.log('Broadcaster registered:', broadcasterId, '- Total:', broadcasters.size);
+
+          // Notify all viewers that this broadcaster is online
           viewers.forEach(viewer => {
             if (viewer.readyState === 1) { // OPEN
-              viewer.send(JSON.stringify({ type: 'broadcaster_status', online: true }));
+              viewer.send(JSON.stringify({
+                type: 'broadcaster_status',
+                online: true,
+                broadcasterId: broadcasterId,
+                name: ws.broadcasterName
+              }));
             }
           });
         } else if (message.role === 'viewer') {
@@ -54,24 +69,34 @@ wss.on('connection', (ws, req) => {
           ws.role = 'viewer';
           console.log('Viewer registered. Total viewers:', viewers.size);
 
-          // Notify viewer if broadcaster is online
-          ws.send(JSON.stringify({
-            type: 'broadcaster_status',
-            online: broadcasters.size > 0
-          }));
+          // Notify viewer about all current broadcasters
+          broadcasters.forEach((broadcaster, broadcasterId) => {
+            ws.send(JSON.stringify({
+              type: 'broadcaster_status',
+              online: true,
+              broadcasterId: broadcasterId,
+              name: broadcaster.name
+            }));
+          });
         }
       } else if (message.type === 'frame') {
-        // Broadcaster sends a frame - forward to all viewers
+        // Broadcaster sends a frame - forward to all viewers with broadcaster ID
         if (ws.role === 'broadcaster') {
+          const frameMessage = JSON.stringify({
+            type: 'frame',
+            data: message.data,
+            broadcasterId: ws.broadcasterId,
+            name: ws.broadcasterName,
+            timestamp: message.timestamp
+          });
+
           let sentCount = 0;
           viewers.forEach(viewer => {
             if (viewer.readyState === 1) { // OPEN
-              viewer.send(dataString); // Forward the frame as string
+              viewer.send(frameMessage);
               sentCount++;
             }
           });
-          // Optionally send feedback to broadcaster
-          // ws.send(JSON.stringify({ type: 'ack', viewers: sentCount }));
         }
       }
     } catch (err) {
@@ -82,17 +107,20 @@ wss.on('connection', (ws, req) => {
   // Handle disconnection
   ws.on('close', () => {
     if (ws.role === 'broadcaster') {
-      broadcasters.delete(ws);
-      console.log('Broadcaster disconnected. Remaining:', broadcasters.size);
+      const broadcasterId = ws.broadcasterId;
+      broadcasters.delete(broadcasterId);
+      console.log('Broadcaster disconnected:', broadcasterId, '- Remaining:', broadcasters.size);
 
-      // Notify viewers that broadcaster went offline
-      if (broadcasters.size === 0) {
-        viewers.forEach(viewer => {
-          if (viewer.readyState === 1) {
-            viewer.send(JSON.stringify({ type: 'broadcaster_status', online: false }));
-          }
-        });
-      }
+      // Notify viewers that this specific broadcaster went offline
+      viewers.forEach(viewer => {
+        if (viewer.readyState === 1) {
+          viewer.send(JSON.stringify({
+            type: 'broadcaster_status',
+            online: false,
+            broadcasterId: broadcasterId
+          }));
+        }
+      });
     } else if (ws.role === 'viewer') {
       viewers.delete(ws);
       console.log('Viewer disconnected. Remaining:', viewers.size);
