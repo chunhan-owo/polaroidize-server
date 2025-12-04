@@ -127,6 +127,23 @@ wss.on('connection', (ws, req) => {
             }
           });
         }
+      } else if (message.type === 'polaroid') {
+        // Viewer (photographer) sends a polaroid - forward to all broadcasters (models)
+        if (ws.role === 'viewer') {
+          const polaroidMessage = JSON.stringify({
+            type: 'polaroid',
+            imageUrl: message.imageUrl,
+            timestamp: message.timestamp
+          });
+
+          console.log('Forwarding polaroid to', broadcasters.size, 'models');
+
+          broadcasters.forEach((broadcaster) => {
+            if (broadcaster.ws.readyState === 1) { // OPEN
+              broadcaster.ws.send(polaroidMessage);
+            }
+          });
+        }
       }
     } catch (err) {
       console.error('Error handling message:', err);
