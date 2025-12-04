@@ -17,6 +17,8 @@ const wss = new WebSocketServer({ server });
 // Store connected clients with IDs
 const broadcasters = new Map(); // broadcasterId -> { ws, name }
 const viewers = new Set();      // Poe Canvas receivers
+let photographerTaken = false;  // Track if photographer role is taken
+let photographerWs = null;      // The photographer's WebSocket
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -69,6 +71,12 @@ wss.on('connection', (ws, req) => {
           ws.role = 'viewer';
           console.log('Viewer registered. Total viewers:', viewers.size);
 
+          // Notify viewer about photographer status
+          ws.send(JSON.stringify({
+            type: 'photographer_status',
+            taken: photographerTaken
+          }));
+
           // Notify viewer about all current broadcasters
           broadcasters.forEach((broadcaster, broadcasterId) => {
             ws.send(JSON.stringify({
@@ -79,6 +87,27 @@ wss.on('connection', (ws, req) => {
             }));
           });
         }
+      } else if (message.type === 'photographer_status') {
+        // Handle photographer role status update
+        photographerTaken = message.taken;
+        if (message.taken) {
+          photographerWs = ws;
+          ws.isPhotographer = true;
+        } else {
+          photographerWs = null;
+          ws.isPhotographer = false;
+        }
+        console.log('Photographer status:', photographerTaken ? 'taken' : 'available');
+
+        // Broadcast to all viewers
+        viewers.forEach(viewer => {
+          if (viewer.readyState === 1) {
+            viewer.send(JSON.stringify({
+              type: 'photographer_status',
+              taken: photographerTaken
+            }));
+          }
+        });
       } else if (message.type === 'frame') {
         // Broadcaster sends a frame - forward to all viewers with broadcaster ID
         if (ws.role === 'broadcaster') {
@@ -124,6 +153,23 @@ wss.on('connection', (ws, req) => {
     } else if (ws.role === 'viewer') {
       viewers.delete(ws);
       console.log('Viewer disconnected. Remaining:', viewers.size);
+
+      // If this was the photographer, release the role
+      if (ws.isPhotographer) {
+        photographerTaken = false;
+        photographerWs = null;
+        console.log('Photographer disconnected, role released');
+
+        // Broadcast to all remaining viewers
+        viewers.forEach(viewer => {
+          if (viewer.readyState === 1) {
+            viewer.send(JSON.stringify({
+              type: 'photographer_status',
+              taken: false
+            }));
+          }
+        });
+      }
     }
   });
 
