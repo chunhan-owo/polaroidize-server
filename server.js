@@ -132,6 +132,24 @@ wss.on('connection', (ws, req) => {
             }
           });
         }
+      } else if (message.type === 'shutter') {
+        // Viewer (photographer) pressed shutter - forward to all broadcasters (models) for flash effect
+        if (ws.role === 'viewer') {
+          const shutterMessage = JSON.stringify({
+            type: 'shutter',
+            timestamp: message.timestamp
+          });
+
+          broadcasters.forEach((broadcaster) => {
+            if (broadcaster.ws.readyState === 1) { // OPEN
+              try {
+                broadcaster.ws.send(shutterMessage);
+              } catch (err) {
+                console.error('Error sending shutter to broadcaster:', err);
+              }
+            }
+          });
+        }
       } else if (message.type === 'polaroid') {
         // Viewer (photographer) sends a polaroid - forward to all broadcasters (models)
         if (ws.role === 'viewer') {
