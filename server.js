@@ -121,9 +121,14 @@ wss.on('connection', (ws, req) => {
 
           let sentCount = 0;
           viewers.forEach(viewer => {
-            if (viewer.readyState === 1) { // OPEN
-              viewer.send(frameMessage);
-              sentCount++;
+            // Check connection is open AND not backlogged (backpressure)
+            if (viewer.readyState === 1 && viewer.bufferedAmount < 1024 * 1024) { // 1MB buffer limit
+              try {
+                viewer.send(frameMessage);
+                sentCount++;
+              } catch (err) {
+                console.error('Error sending frame to viewer:', err);
+              }
             }
           });
         }
@@ -160,11 +165,15 @@ wss.on('connection', (ws, req) => {
       // Notify viewers that this specific broadcaster went offline
       viewers.forEach(viewer => {
         if (viewer.readyState === 1) {
-          viewer.send(JSON.stringify({
-            type: 'broadcaster_status',
-            online: false,
-            broadcasterId: broadcasterId
-          }));
+          try {
+            viewer.send(JSON.stringify({
+              type: 'broadcaster_status',
+              online: false,
+              broadcasterId: broadcasterId
+            }));
+          } catch (err) {
+            console.error('Error notifying viewer of disconnect:', err);
+          }
         }
       });
     } else if (ws.role === 'viewer') {
@@ -180,14 +189,24 @@ wss.on('connection', (ws, req) => {
         // Broadcast to all remaining viewers
         viewers.forEach(viewer => {
           if (viewer.readyState === 1) {
-            viewer.send(JSON.stringify({
-              type: 'photographer_status',
-              taken: false
-            }));
+            try {
+              viewer.send(JSON.stringify({
+                type: 'photographer_status',
+                taken: false
+              }));
+            } catch (err) {
+              console.error('Error notifying viewers:', err);
+            }
           }
         });
       }
     }
+
+    // Explicit cleanup to help garbage collection
+    ws.broadcasterId = null;
+    ws.broadcasterName = null;
+    ws.role = null;
+    ws.isPhotographer = null;
   });
 
   ws.on('error', (error) => {
@@ -195,8 +214,37 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+// Periodic memory monitoring and cleanup
+setInterval(() => {
+  const memUsage = process.memoryUsage();
+  const memUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+  const memTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+
+  console.log(`Memory: ${memUsedMB}MB / ${memTotalMB}MB | Broadcasters: ${broadcasters.size} | Viewers: ${viewers.size}`);
+
+  // Force garbage collection if available (run node with --expose-gc flag)
+  if (global.gc && memUsedMB > 400) {
+    console.log('Running garbage collection...');
+    global.gc();
+  }
+
+  // Clean up stale connections
+  viewers.forEach(viewer => {
+    if (viewer.readyState === 3) { // CLOSED
+      viewers.delete(viewer);
+    }
+  });
+
+  broadcasters.forEach((broadcaster, id) => {
+    if (broadcaster.ws.readyState === 3) { // CLOSED
+      broadcasters.delete(id);
+    }
+  });
+}, 30000); // Every 30 seconds
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`WebSocket server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log('Memory monitoring enabled - reports every 30s');
 });
